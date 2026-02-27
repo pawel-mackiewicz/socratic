@@ -5,6 +5,17 @@ npm install
 npm run dev
 ```
 
+## Security warning (Gemini API key in browser storage)
+
+This app stores the Gemini API key in browser storage (`localStorage`) when you submit it in the setup screen.
+
+This is convenient for local use, but it is **not secure storage**:
+- Any malicious script running in the page context can read it.
+- A malicious browser extension can read it.
+- Anyone with access to your browser profile/session can potentially extract it.
+
+Use this browser-only mode for personal/local usage only. For production or shared environments, move API key handling to a backend service and never expose the key to client-side JavaScript.
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

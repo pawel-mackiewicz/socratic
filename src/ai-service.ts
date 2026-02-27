@@ -1,42 +1,238 @@
-import { GoogleGenerativeAI, ChatSession } from '@google/generative-ai';
 import { SYSTEM_PROMPT } from './prompt';
 
-let chatSession: ChatSession | null = null;
-let genAI: GoogleGenerativeAI | null = null;
+export interface ChatMessage {
+  role: 'user' | 'ai';
+  content: string;
+}
 
-export const initializeAI = (apiKey: string) => {
-    genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-        model: "gemini-3.1-pro",
-        systemInstruction: SYSTEM_PROMPT
-    });
+export interface FetchModelsResult {
+  models: string[];
+  warning?: string;
+  usedFallback: boolean;
+}
 
-    chatSession = model.startChat({
-        history: [],
-        generationConfig: {
-            maxOutputTokens: 8192,
-        },
-    });
+const GEMINI_MODELS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 
-    return true;
+let activeApiKey: string | null = null;
+let activeModelId = DEFAULT_GEMINI_MODEL;
+
+const normalizeModelName = (name: string): string => name.replace(/^models\//, '');
+
+const isModelExperimental = (modelId: string): boolean => {
+  const value = modelId.toLowerCase();
+  return value.includes('experimental') || value.includes('-exp');
 };
 
-export const sendMessageToAI = async (message: string, onChunk: (text: string) => void) => {
-    if (!chatSession) throw new Error("AI not initialized");
+const supportsTextGeneration = (methods: unknown): boolean => {
+  if (!Array.isArray(methods)) return false;
+  return methods.includes('generateContent') || methods.includes('streamGenerateContent');
+};
 
-    try {
-        const result = await chatSession.sendMessageStream(message);
-        let fullText = '';
+const uniqueSorted = (values: string[]): string[] => {
+  return Array.from(new Set(values)).sort((left, right) => left.localeCompare(right));
+};
 
-        for await (const chunk of result.stream) {
-            const chunkText = chunk.text();
-            fullText += chunkText;
-            onChunk(fullText);
+const parseChunkText = (payload: unknown): string => {
+  if (!payload || typeof payload !== 'object') return '';
+
+  const candidates = (payload as { candidates?: unknown }).candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) return '';
+
+  const firstCandidate = candidates[0] as { content?: { parts?: Array<{ text?: unknown }> } };
+  const parts = firstCandidate.content?.parts;
+  if (!Array.isArray(parts)) return '';
+
+  return parts
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('');
+};
+
+const toGeminiRole = (role: ChatMessage['role']): 'user' | 'model' => {
+  return role === 'ai' ? 'model' : 'user';
+};
+
+const createRequestContents = (history: ChatMessage[], message: string) => {
+  const normalizedHistory = history
+    .filter((entry) => entry.content.trim().length > 0)
+    .map((entry) => ({
+      role: toGeminiRole(entry.role),
+      parts: [{ text: entry.content }],
+    }));
+
+  normalizedHistory.push({
+    role: 'user',
+    parts: [{ text: message }],
+  });
+
+  return normalizedHistory;
+};
+
+const processSseResponse = async (response: Response, onChunk: (text: string) => void): Promise<string> => {
+  const contentType = response.headers.get('content-type') || '';
+
+  if (!contentType.includes('text/event-stream')) {
+    const payload = await response.json();
+    const text = parseChunkText(payload);
+    onChunk(text);
+    return text;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('Gemini response stream is unavailable.');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith(':')) continue;
+      if (!line.startsWith('data:')) continue;
+
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+
+      try {
+        const payload = JSON.parse(data);
+        const chunkText = parseChunkText(payload);
+        if (chunkText) {
+          fullText += chunkText;
+          onChunk(fullText);
         }
-
-        return fullText;
-    } catch (error) {
-        console.error("Error communicating with Gemini:", error);
-        throw error;
+      } catch {
+        // Ignore malformed SSE chunks and continue processing stream.
+      }
     }
+  }
+
+  return fullText;
+};
+
+export const initializeAI = (apiKey: string): void => {
+  const normalizedKey = apiKey.trim();
+  if (!normalizedKey) {
+    throw new Error('Gemini API key is required.');
+  }
+
+  activeApiKey = normalizedKey;
+};
+
+export const setActiveModel = (modelId: string): void => {
+  const normalizedModelId = modelId.trim();
+  activeModelId = normalizedModelId || DEFAULT_GEMINI_MODEL;
+};
+
+export const getDefaultModel = (): string => DEFAULT_GEMINI_MODEL;
+
+export const fetchGeminiModels = async (apiKey: string): Promise<FetchModelsResult> => {
+  const normalizedKey = apiKey.trim();
+  if (!normalizedKey) {
+    throw new Error('Gemini API key is required.');
+  }
+
+  try {
+    const response = await fetch(`${GEMINI_MODELS_ENDPOINT}?key=${encodeURIComponent(normalizedKey)}`);
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('Invalid Gemini API key.');
+    }
+
+    if (!response.ok) {
+      return {
+        models: [DEFAULT_GEMINI_MODEL],
+        usedFallback: true,
+        warning: `Could not fetch model list (HTTP ${response.status}). Using fallback model ${DEFAULT_GEMINI_MODEL}.`,
+      };
+    }
+
+    const payload = await response.json() as {
+      models?: Array<{ name?: string; supportedGenerationMethods?: unknown }>;
+    };
+
+    const models = uniqueSorted(
+      (payload.models || [])
+        .filter((entry) => Boolean(entry.name))
+        .filter((entry) => supportsTextGeneration(entry.supportedGenerationMethods))
+        .map((entry) => normalizeModelName(entry.name as string))
+        .filter((modelId) => modelId.startsWith('gemini'))
+        .filter((modelId) => !isModelExperimental(modelId)),
+    );
+
+    if (models.length === 0) {
+      return {
+        models: [DEFAULT_GEMINI_MODEL],
+        usedFallback: true,
+        warning: `Gemini model list was empty. Using fallback model ${DEFAULT_GEMINI_MODEL}.`,
+      };
+    }
+
+    return {
+      models,
+      usedFallback: false,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Invalid Gemini API key.') {
+      throw error;
+    }
+
+    return {
+      models: [DEFAULT_GEMINI_MODEL],
+      usedFallback: true,
+      warning: `Could not fetch model list. Using fallback model ${DEFAULT_GEMINI_MODEL}.`,
+    };
+  }
+};
+
+export const sendMessageToAI = async (
+  message: string,
+  history: ChatMessage[],
+  onChunk: (text: string) => void,
+): Promise<string> => {
+  if (!activeApiKey) {
+    throw new Error('AI not initialized.');
+  }
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: SYSTEM_PROMPT }],
+    },
+    contents: createRequestContents(history, message),
+    generationConfig: {
+      maxOutputTokens: 8192,
+    },
+  };
+
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(activeModelId)}` +
+    `:streamGenerateContent?alt=sse&key=${encodeURIComponent(activeApiKey)}`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('Gemini request was rejected. Check your API key and permissions.');
+  }
+
+  if (!response.ok) {
+    throw new Error(`Gemini request failed with status ${response.status}.`);
+  }
+
+  return processSseResponse(response, onChunk);
 };

@@ -1,6 +1,13 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { initializeAI, sendMessageToAI } from './ai-service';
+import {
+  fetchGeminiModels,
+  getDefaultModel,
+  initializeAI,
+  sendMessageToAI,
+  setActiveModel,
+  type ChatMessage,
+} from './ai-service';
 import './App.css';
 
 interface Message {
@@ -9,6 +16,14 @@ interface Message {
   content: string;
 }
 
+const API_KEY_STORAGE_KEY = 'aiTeacher.geminiApiKey';
+const MODEL_STORAGE_KEY = 'aiTeacher.geminiModel';
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  return 'Unexpected error. Please try again.';
+};
+
 function App() {
   const [apiKey, setApiKey] = useState('');
   const [isApiKeySet, setIsApiKeySet] = useState(false);
@@ -16,6 +31,12 @@ function App() {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [topic, setTopic] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<string[]>([getDefaultModel()]);
+  const [selectedModel, setSelectedModel] = useState(getDefaultModel());
+  const [isModelLoading, setIsModelLoading] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [modelWarning, setModelWarning] = useState<string | null>(null);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -27,16 +48,77 @@ function App() {
     scrollToBottom();
   }, [messages]);
 
-  const handleSetApiKey = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (apiKey.trim()) {
+  const refreshModels = async (key: string, preferredModel: string | null) => {
+    setIsModelLoading(true);
+    const result = await fetchGeminiModels(key);
+    setModelWarning(result.warning || null);
+    setModelOptions(result.models);
+
+    const preferred = preferredModel?.trim() || '';
+    const effectiveModel = result.models.includes(preferred) ? preferred : result.models[0];
+
+    setSelectedModel(effectiveModel);
+    setActiveModel(effectiveModel);
+    localStorage.setItem(MODEL_STORAGE_KEY, effectiveModel);
+    setIsModelLoading(false);
+  };
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      const storedApiKey = localStorage.getItem(API_KEY_STORAGE_KEY);
+      const storedModel = localStorage.getItem(MODEL_STORAGE_KEY);
+
+      if (!storedApiKey) {
+        setIsBootstrapping(false);
+        return;
+      }
+
+      setApiKey(storedApiKey);
+      setSetupError(null);
+
       try {
-        initializeAI(apiKey.trim());
+        initializeAI(storedApiKey);
+        await refreshModels(storedApiKey, storedModel);
         setIsApiKeySet(true);
       } catch (error) {
-        alert("Failed to initialize AI. Please check your API key.");
+        localStorage.removeItem(API_KEY_STORAGE_KEY);
+        localStorage.removeItem(MODEL_STORAGE_KEY);
+        setIsApiKeySet(false);
+        setSetupError(`Stored API key is invalid: ${getErrorMessage(error)}`);
+      } finally {
+        setIsBootstrapping(false);
       }
+    };
+
+    void bootstrap();
+  }, []);
+
+  const handleSetApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const normalizedKey = apiKey.trim();
+    if (!normalizedKey) return;
+
+    setSetupError(null);
+    setModelWarning(null);
+
+    try {
+      initializeAI(normalizedKey);
+      await refreshModels(normalizedKey, localStorage.getItem(MODEL_STORAGE_KEY));
+      localStorage.setItem(API_KEY_STORAGE_KEY, normalizedKey);
+      setApiKey(normalizedKey);
+      setIsApiKeySet(true);
+    } catch (error) {
+      setIsApiKeySet(false);
+      setSetupError(getErrorMessage(error));
     }
+  };
+
+  const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const modelId = e.target.value;
+    setSelectedModel(modelId);
+    setActiveModel(modelId);
+    localStorage.setItem(MODEL_STORAGE_KEY, modelId);
   };
 
   const handleSendMessage = async (e?: React.FormEvent) => {
@@ -44,33 +126,36 @@ function App() {
     if (!inputValue.trim() || isLoading) return;
 
     const userText = inputValue.trim();
+    const historyBeforeSend: ChatMessage[] = messages.map((entry) => ({
+      role: entry.role,
+      content: entry.content,
+    }));
+
     setInputValue('');
 
-    // First message sets the topic implicitly in this simple UI
     if (!topic && messages.length === 0) {
       setTopic(userText);
     }
 
     const newUserMessage: Message = { id: Date.now().toString(), role: 'user', content: userText };
-    setMessages(prev => [...prev, newUserMessage]);
+    const aiMessageId = (Date.now() + 1).toString();
+
+    setMessages((prev) => [...prev, newUserMessage, { id: aiMessageId, role: 'ai', content: '' }]);
     setIsLoading(true);
 
-    const aiMessageId = (Date.now() + 1).toString();
-    setMessages(prev => [...prev, { id: aiMessageId, role: 'ai', content: '' }]);
-
     try {
-      await sendMessageToAI(userText, (chunk) => {
-        setMessages(prev =>
-          prev.map(msg =>
-            msg.id === aiMessageId ? { ...msg, content: chunk } : msg
-          )
+      await sendMessageToAI(userText, historyBeforeSend, (chunk) => {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === aiMessageId ? { ...msg, content: chunk } : msg,
+          ),
         );
       });
-    } catch (error) {
-      setMessages(prev =>
-        prev.map(msg =>
-          msg.id === aiMessageId ? { ...msg, content: "⚠️ *Error communicating with the AI. Please try again.*" } : msg
-        )
+    } catch {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === aiMessageId ? { ...msg, content: '⚠️ *Error communicating with Gemini. Please try again.*' } : msg,
+        ),
       );
     } finally {
       setIsLoading(false);
@@ -80,9 +165,23 @@ function App() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      void handleSendMessage();
     }
   };
+
+  if (isBootstrapping) {
+    return (
+      <div className="app-container setup-container">
+        <div className="setup-card">
+          <div className="setup-header">
+            <div className="setup-icon">🧠</div>
+            <h1>AI Teacher</h1>
+            <p>Loading your local Gemini settings...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!isApiKeySet) {
     return (
@@ -91,9 +190,9 @@ function App() {
           <div className="setup-header">
             <div className="setup-icon">🧠</div>
             <h1>AI Teacher</h1>
-            <p>Welcome to your Socratic guide. Please enter your Gemini API key to begin building knowledge.</p>
+            <p>Welcome to your Socratic guide. Enter your Gemini API key to begin.</p>
           </div>
-          <form className="setup-form" onSubmit={handleSetApiKey}>
+          <form className="setup-form" onSubmit={(e) => void handleSetApiKey(e)}>
             <input
               type="password"
               placeholder="Enter Gemini API Key (AIzaSy...)"
@@ -101,12 +200,17 @@ function App() {
               onChange={(e) => setApiKey(e.target.value)}
               required
             />
-            <button type="submit" className="btn-primary">
-              Begin Journey
+            <button type="submit" className="btn-primary" disabled={isModelLoading}>
+              {isModelLoading ? 'Connecting...' : 'Begin Journey'}
             </button>
           </form>
+          {setupError ? <p className="setup-error">{setupError}</p> : null}
+          <div className="setup-warning" role="alert">
+            <strong>Security warning:</strong> API keys stored in browser storage are vulnerable to theft by malicious scripts or browser extensions.
+            Use this mode only for personal/local use.
+          </div>
           <div className="setup-footer">
-            Your key is used locally in your browser and is not sent to our servers.
+            This app does not send your key to your own backend, but browser-side storage is not a secure vault.
           </div>
         </div>
       </div>
@@ -115,7 +219,6 @@ function App() {
 
   return (
     <div className="app-container">
-      {/* Sidebar for Blueprint and Ladder of Mastery */}
       <aside className="app-sidebar">
         <div className="sidebar-header">
           <h2>Learning Blueprint</h2>
@@ -131,7 +234,7 @@ function App() {
                 Topic: {topic}
               </h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                Follow the Master Craftsman's instructions. The blueprint will naturally evolve in the chat as you climb the Ladder of Mastery.
+                Follow the Master Craftsman&apos;s instructions. The blueprint will naturally evolve in the chat as you climb the Ladder of Mastery.
               </p>
               <div style={{ marginTop: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <div style={{ padding: '1rem', backgroundColor: 'var(--bg-surface)', borderRadius: 'var(--radius-md)', borderLeft: '3px solid var(--accent-success)' }}>
@@ -156,12 +259,33 @@ function App() {
         </div>
       </aside>
 
-      {/* Main Chat Interface */}
       <main className="app-main">
         <header className="main-header">
           <h2>Master Craftsman</h2>
-          <span className="status-indicator">{isLoading ? 'Typing...' : 'Ready'}</span>
+          <div className="header-controls">
+            <label className="model-select-label" htmlFor="gemini-model-select">Model</label>
+            <select
+              id="gemini-model-select"
+              className="model-select"
+              value={selectedModel}
+              onChange={handleModelChange}
+              disabled={isLoading || isModelLoading}
+            >
+              {modelOptions.map((modelId) => (
+                <option key={modelId} value={modelId}>
+                  {modelId}
+                </option>
+              ))}
+            </select>
+            <span className="status-indicator">{isLoading ? 'Typing...' : 'Ready'}</span>
+          </div>
         </header>
+
+        {modelWarning ? (
+          <div className="model-warning-banner" role="status">
+            {modelWarning}
+          </div>
+        ) : null}
 
         <div className="chat-area">
           <div className="message ai-message">
@@ -190,7 +314,7 @@ function App() {
         </div>
 
         <div className="input-area">
-          <form className="input-form" onSubmit={handleSendMessage}>
+          <form className="input-form" onSubmit={(e) => void handleSendMessage(e)}>
             <textarea
               placeholder="Type your message here... (Shift+Enter for newline)"
               rows={1}
