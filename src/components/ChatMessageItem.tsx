@@ -83,7 +83,7 @@ export function ChatMessageItem({
                     </div>
                 ) : (
                     <>
-                        <p>{message.content}</p>
+                        <ReactMarkdown>{message.content}</ReactMarkdown>
                         <div style={{ display: 'flex', gap: '8px', marginTop: '0.7rem', justifyContent: 'flex-end' }}>
                             <button
                                 type="button"

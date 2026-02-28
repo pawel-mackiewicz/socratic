@@ -461,10 +461,30 @@
   border-top-right-radius: 4px;
   color: var(--text-primary);
   border: 1px solid var(--border-medium);
+  flex: 0 1 auto;
+  max-width: calc(100% - 40px - 1.25rem);
+  /* Account for avatar and gap */
 }
 
 .user-message .message-content p {
   color: var(--text-primary);
+}
+
+.user-message .message-content pre {
+  background-color: var(--bg-panel);
+  border-color: var(--border-strong);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: hidden;
+}
+
+.user-message .message-content code {
+  background-color: var(--bg-panel);
+}
+
+.user-message .message-content hr {
+  border-top-color: var(--border-strong);
+  margin: 0.75rem 0;
 }
 
 .message-retry-btn {

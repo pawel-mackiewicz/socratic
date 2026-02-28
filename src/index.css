@@ -181,6 +181,7 @@ textarea::placeholder {
 
 .prose p {
   margin-bottom: 1rem;
+  white-space: pre-wrap;
 }
 
 .prose p:last-child {
@@ -248,4 +249,10 @@ textarea::placeholder {
   padding: 0;
   color: var(--text-primary);
   font-size: 0.85em;
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 1.5rem 0;
 }
