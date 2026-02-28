@@ -6,8 +6,10 @@ import {
   initializeAI,
   sendMessageToAI,
   setActiveModel,
+  generateFlashcards,
   type ChatMessage,
 } from './ai-service';
+import { calculateNextSRSDelay, type SRSData } from './srs';
 import './App.css';
 
 interface Message {
@@ -25,10 +27,23 @@ interface Conversation {
   updatedAt: number;
 }
 
+export interface Flashcard {
+  id: string;
+  front: string;
+  back: string;
+  topic: string;
+  conversationId: string;
+  interval: number;
+  repetition: number;
+  easinessFactor: number;
+  nextReviewDate: number;
+}
+
 const API_KEY_STORAGE_KEY = 'aiTeacher.geminiApiKey';
 const MODEL_STORAGE_KEY = 'aiTeacher.geminiModel';
 const CONVERSATIONS_STORAGE_KEY = 'aiTeacher.conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'aiTeacher.activeConversationId';
+const FLASHCARDS_STORAGE_KEY = 'aiTeacher.flashcards';
 const DEFAULT_CONVERSATION_TITLE = 'New conversation';
 const MAX_CONVERSATION_TITLE_LENGTH = 52;
 const EMPTY_MESSAGES: Message[] = [];
@@ -139,6 +154,16 @@ const loadStoredConversations = (): Conversation[] => {
   }
 };
 
+const loadStoredFlashcards = (): Flashcard[] => {
+  const raw = localStorage.getItem(FLASHCARDS_STORAGE_KEY);
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as Flashcard[];
+  } catch {
+    return [];
+  }
+};
+
 function App() {
   const [apiKey, setApiKey] = useState('');
   const [isApiKeySet, setIsApiKeySet] = useState(false);
@@ -152,6 +177,12 @@ function App() {
   const [setupError, setSetupError] = useState<string | null>(null);
   const [modelWarning, setModelWarning] = useState<string | null>(null);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
+
+  const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [isFlashcardsView, setIsFlashcardsView] = useState(false);
+  const [isGeneratingFlashcards, setIsGeneratingFlashcards] = useState(false);
+  const [currentStudyCardId, setCurrentStudyCardId] = useState<string | null>(null);
+  const [isCardRevealed, setIsCardRevealed] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversation = useMemo(
@@ -203,6 +234,7 @@ function App() {
 
       setConversations(storedConversations);
       setActiveConversationId(selectedConversationId);
+      setFlashcards(loadStoredFlashcards());
 
       const storedApiKey = localStorage.getItem(API_KEY_STORAGE_KEY);
       const storedModel = localStorage.getItem(MODEL_STORAGE_KEY);
@@ -242,6 +274,10 @@ function App() {
     localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId);
   }, [activeConversationId]);
 
+  useEffect(() => {
+    localStorage.setItem(FLASHCARDS_STORAGE_KEY, JSON.stringify(flashcards));
+  }, [flashcards]);
+
   const handleCreateConversation = () => {
     if (isLoading) return;
 
@@ -249,6 +285,57 @@ function App() {
     setConversations((prev) => [nextConversation, ...prev]);
     setActiveConversationId(nextConversation.id);
     setInputValue('');
+    setIsFlashcardsView(false);
+  };
+
+  const handleCreateFlashcards = async () => {
+    if (!activeConversation || isGeneratingFlashcards) return;
+    setIsGeneratingFlashcards(true);
+    try {
+      const topic = activeConversation.topic || activeConversation.title;
+      const generated = await generateFlashcards(topic, activeConversation.messages);
+
+      const newCards: Flashcard[] = generated.map(card => ({
+        id: createId(),
+        front: card.front,
+        back: card.back,
+        topic,
+        conversationId: activeConversation.id,
+        interval: 0,
+        repetition: 0,
+        easinessFactor: 2.5,
+        nextReviewDate: Date.now(),
+      }));
+
+      setFlashcards(prev => [...prev, ...newCards]);
+      setIsFlashcardsView(true);
+    } catch (err) {
+      alert(getErrorMessage(err));
+    } finally {
+      setIsGeneratingFlashcards(false);
+    }
+  };
+
+  const handleReviewFlashcard = (cardId: string, rating: 0 | 1 | 2 | 3 | 4 | 5) => {
+    setFlashcards(prev => prev.map(card => {
+      if (card.id !== cardId) return card;
+
+      const currentData: SRSData = {
+        interval: card.interval,
+        repetition: card.repetition,
+        easinessFactor: card.easinessFactor
+      };
+
+      const newData = calculateNextSRSDelay(rating, currentData);
+
+      return {
+        ...card,
+        ...newData
+      };
+    }));
+
+    setIsCardRevealed(false);
+    setCurrentStudyCardId(null);
   };
 
   const handleSetApiKey = async (e: React.FormEvent) => {
@@ -355,6 +442,18 @@ function App() {
     }
   };
 
+  const dueCards = flashcards.filter(c => c.nextReviewDate <= Date.now());
+  const currentCard = currentStudyCardId
+    ? flashcards.find(c => c.id === currentStudyCardId) || dueCards[0] || null
+    : dueCards[0] || null;
+
+  useEffect(() => {
+    if (currentCard && currentStudyCardId !== currentCard.id) {
+      setCurrentStudyCardId(currentCard.id);
+      setIsCardRevealed(false);
+    }
+  }, [currentCard, currentStudyCardId]);
+
   if (isBootstrapping) {
     return (
       <div className="app-container setup-container">
@@ -407,6 +506,17 @@ function App() {
     <div className="app-container">
       <aside className="app-sidebar">
         <div className="sidebar-header sidebar-header-row">
+          <h2>Menu</h2>
+        </div>
+
+        <button
+          className={`sidebar-menu-btn ${isFlashcardsView ? 'active' : ''}`}
+          onClick={() => setIsFlashcardsView(true)}
+        >
+          Flashcards ({dueCards.length} due)
+        </button>
+
+        <div className="sidebar-header sidebar-header-row" style={{ marginTop: '20px' }}>
           <h2>Conversations</h2>
           <button
             type="button"
@@ -422,8 +532,11 @@ function App() {
             <button
               key={conversation.id}
               type="button"
-              className={`conversation-item ${conversation.id === activeConversationId ? 'active' : ''}`}
-              onClick={() => setActiveConversationId(conversation.id)}
+              className={`conversation-item ${conversation.id === activeConversationId && !isFlashcardsView ? 'active' : ''}`}
+              onClick={() => {
+                setActiveConversationId(conversation.id);
+                setIsFlashcardsView(false);
+              }}
               disabled={isLoading}
             >
               <span className="conversation-title">{conversation.title}</span>
@@ -436,7 +549,17 @@ function App() {
 
       <main className="app-main">
         <header className="main-header">
-          <h2>Master Craftsman</h2>
+          <h2>{isFlashcardsView ? 'Flashcards Dashboard' : 'Master Craftsman'}</h2>
+          {!isFlashcardsView && activeConversation?.messages.length ? (
+            <button
+              className="btn-secondary"
+              onClick={handleCreateFlashcards}
+              disabled={isGeneratingFlashcards}
+              style={{ marginRight: '16px' }}
+            >
+              {isGeneratingFlashcards ? 'Generating...' : 'Make Flashcards'}
+            </button>
+          ) : null}
           <div className="header-controls">
             <label className="model-select-label" htmlFor="gemini-model-select">Model</label>
             <select
@@ -462,47 +585,95 @@ function App() {
           </div>
         ) : null}
 
-        <div className="chat-area">
-          <div className="message ai-message">
-            <div className="message-avatar">🧠</div>
-            <div className="message-content prose">
-              <p>Greetings. I am your AI Teacher, here to help you construct a robust understanding of any topic, one solid brick at a time.</p>
-              <p>What topic would you like to master today? What do you already know about it, and what is your primary goal?</p>
-            </div>
+        {isFlashcardsView ? (
+          <div className="flashcards-area">
+            {currentCard ? (
+              <div className="flashcard-study-container">
+                <div className="flashcard">
+                  <div className="flashcard-front">
+                    <h3>Question</h3>
+                    <div className="prose"><ReactMarkdown>{currentCard.front}</ReactMarkdown></div>
+                  </div>
+
+                  {isCardRevealed ? (
+                    <div className="flashcard-back">
+                      <hr />
+                      <h3>Answer</h3>
+                      <div className="prose"><ReactMarkdown>{currentCard.back}</ReactMarkdown></div>
+
+                      <div className="srs-controls">
+                        <p>How well did you know this?</p>
+                        <div className="srs-buttons">
+                          <button className="srs-btn srs-btn-1" onClick={() => handleReviewFlashcard(currentCard.id, 0)}>Blackout <small>Reset</small></button>
+                          <button className="srs-btn srs-btn-2" onClick={() => handleReviewFlashcard(currentCard.id, 1)}>Wrong <small>Remembered</small></button>
+                          <button className="srs-btn srs-btn-3" onClick={() => handleReviewFlashcard(currentCard.id, 2)}>Wrong <small>Effortless</small></button>
+                          <button className="srs-btn srs-btn-4" onClick={() => handleReviewFlashcard(currentCard.id, 3)}>Hard <small>Struggled</small></button>
+                          <button className="srs-btn srs-btn-5" onClick={() => handleReviewFlashcard(currentCard.id, 4)}>Good <small>Standard</small></button>
+                          <button className="srs-btn srs-btn-6" onClick={() => handleReviewFlashcard(currentCard.id, 5)}>Easy <small>Perfect</small></button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flashcard-reveal-container">
+                      <button className="btn-primary" onClick={() => setIsCardRevealed(true)}>Reveal Answer</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flashcards-empty">
+                <div className="setup-icon">🎉</div>
+                <h3>All caught up!</h3>
+                <p>You have {flashcards.length} total flashcards, and 0 due right now.</p>
+                <p>Review more conversations and generate more cards to accelerate your learning.</p>
+              </div>
+            )}
           </div>
+        ) : (
+          <>
+            <div className="chat-area">
+              <div className="message ai-message">
+                <div className="message-avatar">🧠</div>
+                <div className="message-content prose">
+                  <p>Greetings. I am your AI Teacher, here to help you construct a robust understanding of any topic, one solid brick at a time.</p>
+                  <p>What topic would you like to master today? What do you already know about it, and what is your primary goal?</p>
+                </div>
+              </div>
 
-          {messages.map((msg) => (
-            <div key={msg.id} className={`message ${msg.role === 'user' ? 'user-message' : 'ai-message'}`}>
-              <div className="message-avatar">
-                {msg.role === 'user' ? 'U' : '🧠'}
-              </div>
-              <div className="message-content prose">
-                {msg.role === 'ai' ? (
-                  <ReactMarkdown>{msg.content}</ReactMarkdown>
-                ) : (
-                  <p>{msg.content}</p>
-                )}
-              </div>
+              {messages.map((msg) => (
+                <div key={msg.id} className={`message ${msg.role === 'user' ? 'user-message' : 'ai-message'}`}>
+                  <div className="message-avatar">
+                    {msg.role === 'user' ? 'U' : '🧠'}
+                  </div>
+                  <div className="message-content prose">
+                    {msg.role === 'ai' ? (
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    ) : (
+                      <p>{msg.content}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
             </div>
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
 
-        <div className="input-area">
-          <form className="input-form" onSubmit={(e) => void handleSendMessage(e)}>
-            <textarea
-              placeholder="Type your message here... (Shift+Enter for newline)"
-              rows={1}
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={isLoading}
-            />
-            <button type="submit" className="btn-send" aria-label="Send Message" disabled={!inputValue.trim() || isLoading}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-            </button>
-          </form>
-        </div>
+            <div className="input-area">
+              <form className="input-form" onSubmit={(e) => void handleSendMessage(e)}>
+                <textarea
+                  placeholder="Type your message here... (Shift+Enter for newline)"
+                  rows={1}
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  disabled={isLoading}
+                />
+                <button type="submit" className="btn-send" aria-label="Send Message" disabled={!inputValue.trim() || isLoading}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                </button>
+              </form>
+            </div>
+          </>
+        )}
       </main>
     </div>
   );

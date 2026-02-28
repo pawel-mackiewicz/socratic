@@ -236,3 +236,70 @@ export const sendMessageToAI = async (
 
   return processSseResponse(response, onChunk);
 };
+
+export const generateFlashcards = async (
+  topic: string,
+  history: ChatMessage[],
+): Promise<Array<{ front: string; back: string }>> => {
+  if (!activeApiKey) {
+    throw new Error('AI not initialized.');
+  }
+
+  const prompt = `Based on the preceding Socratic conversation about "${topic}", generate exactly 10 high-quality flashcards to help the user review and memorize the key concepts discussed.
+You MUST respond with valid JSON ONLY.
+
+JSON Format:
+{
+  "flashcards": [
+    {
+      "front": "Question or concept to remember",
+      "back": "Detailed answer or explanation"
+    }
+  ]
+}`;
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: "You are an expert AI educator. Output valid JSON ONLY." }],
+    },
+    contents: createRequestContents(history, prompt),
+    generationConfig: {
+      maxOutputTokens: 8192,
+      responseMimeType: "application/json",
+    },
+  };
+
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(activeModelId)}` +
+    `:generateContent?key=${encodeURIComponent(activeApiKey)}`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Gemini request failed with status ${response.status}.`);
+  }
+
+  const data = await response.json();
+  const text = parseChunkText(data);
+
+  if (!text) {
+    throw new Error('Gemini returned an empty response.');
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed.flashcards && Array.isArray(parsed.flashcards)) {
+      return parsed.flashcards;
+    }
+    throw new Error('Invalid JSON schema returned.');
+  } catch (err) {
+    console.error("Failed to parse flashcards:", text, err);
+    throw new Error('Failed to parse flashcards from AI response.');
+  }
+};
