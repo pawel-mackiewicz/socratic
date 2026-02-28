@@ -9,6 +9,7 @@ interface ChatPanelProps {
   onInputChange: (value: string) => void;
   onInputKeyDown: (e: KeyboardEvent<HTMLTextAreaElement>) => void;
   onSubmit: (e: FormEvent) => void;
+  onRetryMessage: (messageId: string) => void;
 }
 
 export function ChatPanel({
@@ -18,6 +19,7 @@ export function ChatPanel({
   onInputChange,
   onInputKeyDown,
   onSubmit,
+  onRetryMessage,
 }: ChatPanelProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -61,7 +63,19 @@ export function ChatPanel({
               {message.role === 'ai' ? (
                 <ReactMarkdown>{message.content}</ReactMarkdown>
               ) : (
-                <p>{message.content}</p>
+                <>
+                  <p>{message.content}</p>
+                  <button
+                    type="button"
+                    className="message-retry-btn"
+                    onClick={() => onRetryMessage(message.id)}
+                    disabled={isLoading}
+                    aria-label="Retry from this message"
+                    title="Retry from this message"
+                  >
+                    Retry from here
+                  </button>
+                </>
               )}
             </div>
           </div>

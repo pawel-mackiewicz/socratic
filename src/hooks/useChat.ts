@@ -7,9 +7,9 @@ import {
   type SetStateAction,
 } from 'react';
 import { sendMessageToAI, type ChatMessage } from '../ai-service';
-import { toConversationTitle } from '../domain/conversations';
+import { resetConversationForRetry, toConversationTitle } from '../domain/conversations';
 import { addLog } from '../logger';
-import type { Conversation } from '../types/app';
+import type { Conversation, Message } from '../types/app';
 import { createId } from '../utils/id';
 
 interface UseChatParams {
@@ -22,8 +22,22 @@ export interface UseChatResult {
   setInputValue: Dispatch<SetStateAction<string>>;
   isLoading: boolean;
   sendMessage: (e?: FormEvent) => Promise<void>;
+  retryMessage: (messageId: string) => Promise<void>;
   handleInputEnter: (e: KeyboardEvent<HTMLTextAreaElement>) => void;
 }
+
+interface StreamReplyParams {
+  conversationId: string;
+  aiMessageId: string;
+  userText: string;
+  historyBeforeSend: ChatMessage[];
+}
+
+const toChatHistory = (messages: Message[]): ChatMessage[] =>
+  messages.map((entry) => ({
+    role: entry.role,
+    content: entry.content,
+  }));
 
 export const useChat = ({
   activeConversation,
@@ -32,49 +46,15 @@ export const useChat = ({
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const sendMessage = useCallback(
-    async (e?: FormEvent) => {
-      if (e) e.preventDefault();
-      if (!inputValue.trim() || isLoading || !activeConversation) return;
-
-      const userText = inputValue.trim();
-      const currentConversationId = activeConversation.id;
-      const historyBeforeSend: ChatMessage[] = activeConversation.messages.map((entry) => ({
-        role: entry.role,
-        content: entry.content,
-      }));
-
-      setInputValue('');
-      addLog('action', 'Sent message in conversation');
-
-      const newUserMessage = { id: createId(), role: 'user' as const, content: userText };
-      const aiMessageId = createId();
-
-      setConversations((prev) =>
-        prev.map((conversation) => {
-          if (conversation.id !== currentConversationId) return conversation;
-
-          return {
-            ...conversation,
-            topic: conversation.topic || userText,
-            title: conversation.messages.length === 0 ? toConversationTitle(userText) : conversation.title,
-            messages: [
-              ...conversation.messages,
-              newUserMessage,
-              { id: aiMessageId, role: 'ai' as const, content: '' },
-            ],
-            updatedAt: Date.now(),
-          };
-        }),
-      );
-
+  const streamReply = useCallback(
+    async ({ conversationId, aiMessageId, userText, historyBeforeSend }: StreamReplyParams) => {
       setIsLoading(true);
 
       try {
         await sendMessageToAI(userText, historyBeforeSend, (chunk) => {
           setConversations((prev) =>
             prev.map((conversation) => {
-              if (conversation.id !== currentConversationId) return conversation;
+              if (conversation.id !== conversationId) return conversation;
 
               return {
                 ...conversation,
@@ -89,7 +69,7 @@ export const useChat = ({
       } catch {
         setConversations((prev) =>
           prev.map((conversation) => {
-            if (conversation.id !== currentConversationId) return conversation;
+            if (conversation.id !== conversationId) return conversation;
 
             return {
               ...conversation,
@@ -106,7 +86,81 @@ export const useChat = ({
         setIsLoading(false);
       }
     },
-    [activeConversation, inputValue, isLoading, setConversations],
+    [setConversations],
+  );
+
+  const sendMessage = useCallback(
+    async (e?: FormEvent) => {
+      if (e) e.preventDefault();
+      if (!inputValue.trim() || isLoading || !activeConversation) return;
+
+      const userText = inputValue.trim();
+      const conversationId = activeConversation.id;
+      const historyBeforeSend = toChatHistory(activeConversation.messages);
+
+      setInputValue('');
+      addLog('action', 'Sent message in conversation');
+
+      const newUserMessage = { id: createId(), role: 'user' as const, content: userText };
+      const aiMessageId = createId();
+
+      setConversations((prev) =>
+        prev.map((conversation) => {
+          if (conversation.id !== conversationId) return conversation;
+
+          return {
+            ...conversation,
+            topic: conversation.topic || userText,
+            title: conversation.messages.length === 0 ? toConversationTitle(userText) : conversation.title,
+            messages: [
+              ...conversation.messages,
+              newUserMessage,
+              { id: aiMessageId, role: 'ai' as const, content: '' },
+            ],
+            updatedAt: Date.now(),
+          };
+        }),
+      );
+
+      await streamReply({
+        conversationId,
+        aiMessageId,
+        userText,
+        historyBeforeSend,
+      });
+    },
+    [activeConversation, inputValue, isLoading, setConversations, streamReply],
+  );
+
+  const retryMessage = useCallback(
+    async (messageId: string) => {
+      if (isLoading || !activeConversation) return;
+
+      const conversationId = activeConversation.id;
+      const aiMessageId = createId();
+      const retryResult = resetConversationForRetry(activeConversation, messageId, aiMessageId);
+      if (!retryResult) return;
+
+      const userText = retryResult.selectedMessage.content;
+      const historyBeforeSend = toChatHistory(retryResult.historyBeforeRetry);
+
+      addLog('action', `Retried message ${messageId} in conversation`);
+
+      setConversations((prev) =>
+        prev.map((conversation) => {
+          if (conversation.id !== conversationId) return conversation;
+          return retryResult.nextConversation;
+        }),
+      );
+
+      await streamReply({
+        conversationId,
+        aiMessageId,
+        userText,
+        historyBeforeSend,
+      });
+    },
+    [activeConversation, isLoading, setConversations, streamReply],
   );
 
   const handleInputEnter = useCallback(
@@ -124,6 +178,7 @@ export const useChat = ({
     setInputValue,
     isLoading,
     sendMessage,
+    retryMessage,
     handleInputEnter,
   };
 };

@@ -55,6 +55,43 @@ export const normalizeMessages = (value: unknown): Message[] => {
     }));
 };
 
+export interface RetryConversationResult {
+  nextConversation: Conversation;
+  selectedMessage: Message;
+  historyBeforeRetry: Message[];
+}
+
+export const resetConversationForRetry = (
+  conversation: Conversation,
+  messageId: string,
+  aiMessageId: string,
+  timestamp = Date.now(),
+): RetryConversationResult | null => {
+  const retryIndex = conversation.messages.findIndex(
+    (message) => message.id === messageId && message.role === 'user',
+  );
+
+  if (retryIndex < 0) return null;
+
+  const selectedMessage = conversation.messages[retryIndex];
+  const userText = selectedMessage.content;
+  if (!userText.trim()) return null;
+
+  const messagesAtRetryPoint = conversation.messages.slice(0, retryIndex + 1);
+
+  return {
+    selectedMessage,
+    historyBeforeRetry: conversation.messages.slice(0, retryIndex),
+    nextConversation: {
+      ...conversation,
+      topic: conversation.topic || userText,
+      title: messagesAtRetryPoint.length === 1 ? toConversationTitle(userText) : conversation.title,
+      messages: [...messagesAtRetryPoint, { id: aiMessageId, role: 'ai', content: '' }],
+      updatedAt: timestamp,
+    },
+  };
+};
+
 export const createConversation = (): Conversation => {
   const now = Date.now();
   return {

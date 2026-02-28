@@ -455,6 +455,32 @@
   color: var(--text-primary);
 }
 
+.message-retry-btn {
+  margin-top: 0.7rem;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.55rem;
+  transition: all var(--transition-fast);
+  display: block;
+}
+
+.message-retry-btn:hover:not(:disabled) {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  background-color: rgba(99, 102, 241, 0.12);
+}
+
+.message-retry-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* === Input Area === */
 .input-area {
   padding: 1.5rem 2rem;

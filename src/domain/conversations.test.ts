@@ -6,6 +6,7 @@ import {
 import {
   formatConversationTimestamp,
   loadStoredConversations,
+  resetConversationForRetry,
   toConversationTitle,
   toMessagePreview,
 } from './conversations';
@@ -123,5 +124,39 @@ describe('conversations domain', () => {
         content: '',
       },
     ]);
+  });
+
+  it('removes messages after retry point and appends fresh ai placeholder', () => {
+    const conversation = {
+      id: 'conv-1',
+      title: 'Test conversation',
+      topic: 'Testing',
+      messages: [
+        { id: 'u1', role: 'user' as const, content: 'First question' },
+        { id: 'a1', role: 'ai' as const, content: 'First answer' },
+        { id: 'u2', role: 'user' as const, content: 'Second question' },
+        { id: 'a2', role: 'ai' as const, content: 'Second answer' },
+        { id: 'u3', role: 'user' as const, content: 'Third question' },
+      ],
+      createdAt: 100,
+      updatedAt: 100,
+    };
+
+    const result = resetConversationForRetry(conversation, 'u2', 'ai-retry', 999);
+
+    expect(result).not.toBeNull();
+    expect(result?.historyBeforeRetry).toEqual([
+      { id: 'u1', role: 'user', content: 'First question' },
+      { id: 'a1', role: 'ai', content: 'First answer' },
+    ]);
+
+    expect(result?.nextConversation.messages).toEqual([
+      { id: 'u1', role: 'user', content: 'First question' },
+      { id: 'a1', role: 'ai', content: 'First answer' },
+      { id: 'u2', role: 'user', content: 'Second question' },
+      { id: 'ai-retry', role: 'ai', content: '' },
+    ]);
+
+    expect(result?.nextConversation.updatedAt).toBe(999);
   });
 });
