@@ -1,4 +1,4 @@
-import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Message } from '../types/app';
 
@@ -20,10 +20,19 @@ export function ChatPanel({
   onSubmit,
 }: ChatPanelProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useLayoutEffect(() => {
+    if (textareaRef.current) {
+      // Reset height to auto to correctly measure scrollHeight
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [inputValue]);
 
   return (
     <>
@@ -63,6 +72,7 @@ export function ChatPanel({
       <div className="input-area">
         <form className="input-form" onSubmit={onSubmit}>
           <textarea
+            ref={textareaRef}
             placeholder="Type your message here... (Shift+Enter for newline)"
             rows={1}
             value={inputValue}
