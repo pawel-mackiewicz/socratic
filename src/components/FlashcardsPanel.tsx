@@ -1,5 +1,6 @@
-import { useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useState, useEffect, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
+import confetti from 'canvas-confetti';
 import type { Flashcard } from '../types/app';
 import type {
   FlashcardRating,
@@ -48,6 +49,35 @@ export function FlashcardsPanel({
   const [correctionInput, setCorrectionInput] = useState('');
   const canSubmitAnswer = !isEvaluatingAnswer && typedAnswer.trim().length > 0;
   const canSubmitCorrection = correctionInput.trim().length > 0;
+
+  useEffect(() => {
+    if (pendingEvaluation?.score === 5) {
+      const duration = 2000;
+      const end = Date.now() + duration;
+
+      const frame = () => {
+        confetti({
+          particleCount: 5,
+          angle: 60,
+          spread: 55,
+          origin: { x: 0 },
+          colors: ['#3b82f6', '#93c5fd', '#ffffff', '#e2e8f0']
+        });
+        confetti({
+          particleCount: 5,
+          angle: 120,
+          spread: 55,
+          origin: { x: 1 },
+          colors: ['#3b82f6', '#93c5fd', '#ffffff', '#e2e8f0']
+        });
+
+        if (Date.now() < end) {
+          requestAnimationFrame(frame);
+        }
+      };
+      frame();
+    }
+  }, [pendingEvaluation]);
 
   const handleSubmitAnswer = (e: FormEvent) => {
     e.preventDefault();
