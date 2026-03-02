@@ -1,4 +1,4 @@
-# What is this?
+## What is this?
 
 I vibecoded it for myself for learning new things. Like CS and new words in Foreign Languages. I had it scattered across different apps and tools. So I decided to make one app for all of it. 
 
@@ -22,21 +22,21 @@ It uses Gemini API for the heavy lifting. So you need to provide your own API ke
 
 Enjoy.
 
-# How to start?
+## How to start?
 
 ```bash
 npm install
 npm run dev
 ```
 
-# How to use?
+## How to use?
 
 1. Open the app in your browser.
 2. Provide your Gemini API key.
 3. Start learning!
 
 
-# Security warning (Gemini API key in browser storage)
+## Security warning (Gemini API key in browser storage)
 
 This app stores the Gemini API key in browser storage (`localStorage`) when you submit it in the setup screen.
 
