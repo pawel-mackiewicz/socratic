@@ -1,10 +1,12 @@
 ## What is this?
 
-I vibecoded it for myself for learning new things. Like CS and new words in Foreign Languages. I had it scattered across different apps and tools. So I decided to make one app for all of it. 
+I vibecoded it for myself for learning new things. Like CS and new words in Foreign Languages. 
+I had it scattered across different apps and tools, so I decided to make a single app from it.
 
-I use it daily, maybe it would be useful for you too.
+I use it daily; it may be useful for you as well.
 
-It uses Bloom's Taxonomy (levels 2 to 5) for structuring the learning process.
+AI follows Bloom's Taxonomy (levels 2 to 5) for structuring the learning process.
+
 So it goes:
 
 2. understanding
@@ -14,7 +16,7 @@ So it goes:
 
 And then you can create flashcards with the help of AI from the given topic that you just learned.
 
-There is also section for learning words in different languages - just provide a word and AI will give you definition, examples and translations.  
+There is also section for learning words in different languages - just provide a word, and AI will give you definition, examples and translations.  
 
 Flashcards and word learning uses Spaced Repetition System (SRS) with SuperMemo 2 algorithm.
 
