@@ -12,6 +12,7 @@ import {
   describeWords,
   enrichWordWithLLM,
   evaluateFlashcardAnswer,
+  generateTopicFlashcards,
   generateTopicWords,
   initializeAI,
   sendMessageToAI,
@@ -432,5 +433,102 @@ describe('word generation APIs', () => {
       example: 'I travel often.',
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('topic flashcards generation API', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    initializeAI('secret-key');
+    setActiveModel('gemini-2.5-flash');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('parses topic flashcards result and normalizes entries', async () => {
+    const flashcardsJson = JSON.stringify({
+      flashcards: [
+        { front: ' What is closure? ', back: ' Capturing lexical scope. ' },
+        { front: 'What is closure?', back: 'Duplicate front should be removed.' },
+        { front: ' ', back: 'Invalid entry' },
+      ],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(createGenerateContentResponse(flashcardsJson)),
+    );
+
+    await expect(generateTopicFlashcards('JavaScript', 10)).resolves.toEqual([
+      { front: 'What is closure?', back: 'Capturing lexical scope.' },
+    ]);
+  });
+
+  it('passes additional information and history in request payload', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(createGenerateContentResponse(JSON.stringify({
+      flashcards: [{ front: 'Q1', back: 'A1' }],
+    })));
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generateTopicFlashcards('JavaScript', 3, {
+      additionalInformation: 'Focus on async and promises.',
+      history: [
+        { role: 'user', content: 'We talked about callbacks.' },
+        { role: 'ai', content: 'And event loop fundamentals.' },
+      ],
+    });
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      contents: Array<{ role: string; parts: Array<{ text: string }> }>;
+    };
+
+    expect(requestBody.contents).toHaveLength(3);
+    expect(requestBody.contents[0].role).toBe('user');
+    expect(requestBody.contents[1].role).toBe('model');
+    expect(requestBody.contents[2].parts[0].text).toContain('Additional information:');
+    expect(requestBody.contents[2].parts[0].text).toContain('Focus on async and promises.');
+  });
+
+  it('rejects malformed topic flashcards JSON', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(createGenerateContentResponse('{not-json')),
+    );
+
+    await expect(generateTopicFlashcards('Databases', 5)).rejects.toThrow(
+      'Failed to parse generated topic flashcards JSON',
+    );
+  });
+
+  it('rejects invalid schema for topic flashcards', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(createGenerateContentResponse(JSON.stringify({ wrong: [] }))),
+    );
+
+    await expect(generateTopicFlashcards('Databases', 5)).rejects.toThrow(
+      'Topic flashcards JSON schema is invalid.',
+    );
+  });
+
+  it('clamps requested count and slices returned flashcards', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(createGenerateContentResponse(JSON.stringify({
+        flashcards: [
+          { front: 'Q1', back: 'A1' },
+          { front: 'Q2', back: 'A2' },
+          { front: 'Q3', back: 'A3' },
+        ],
+      }))),
+    );
+
+    await expect(generateTopicFlashcards('Databases', 2)).resolves.toEqual([
+      { front: 'Q1', back: 'A1' },
+      { front: 'Q2', back: 'A2' },
+    ]);
   });
 });

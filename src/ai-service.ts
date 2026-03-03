@@ -44,6 +44,11 @@ export interface WordEnrichment {
   example: string;
 }
 
+export interface TopicFlashcardGenerationOptions {
+  history?: ChatMessage[];
+  additionalInformation?: string;
+}
+
 type ChatRequestErrorCategory =
   | 'first_token_timeout'
   | 'between_tokens_timeout'
@@ -212,6 +217,53 @@ const parseTopicWordsResult = (text: string): string[] => {
   }
 
   return words;
+};
+
+const parseTopicFlashcardsResult = (text: string): Array<{ front: string; back: string }> => {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('Failed to parse generated topic flashcards JSON from AI response.');
+  }
+
+  const rawFlashcards = (
+    parsed &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { flashcards?: unknown }).flashcards)
+  )
+    ? (parsed as { flashcards: unknown[] }).flashcards
+    : null;
+
+  if (!rawFlashcards) {
+    throw new Error('Topic flashcards JSON schema is invalid.');
+  }
+
+  const seen = new Set<string>();
+  const flashcards: Array<{ front: string; back: string }> = [];
+
+  rawFlashcards.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    const payload = entry as { front?: unknown; back?: unknown };
+    if (typeof payload.front !== 'string' || typeof payload.back !== 'string') return;
+
+    const front = payload.front.trim().replace(/\s+/g, ' ');
+    const back = payload.back.trim().replace(/\s+/g, ' ');
+    if (!front || !back) return;
+
+    const frontKey = normalizeWordLookupKey(front);
+    if (!frontKey || seen.has(frontKey)) return;
+
+    seen.add(frontKey);
+    flashcards.push({ front, back });
+  });
+
+  if (flashcards.length === 0) {
+    throw new Error('Topic flashcards response did not include any valid flashcards.');
+  }
+
+  return flashcards;
 };
 
 const parseWordTranslationsResult = (text: string): Record<string, string> => {
@@ -804,6 +856,103 @@ JSON Format:
   } catch (err) {
     console.error("Failed to parse flashcards:", text, err);
     throw new Error('Failed to parse flashcards from AI response.');
+  }
+};
+
+export const generateTopicFlashcards = async (
+  topic: string,
+  count: number,
+  options: TopicFlashcardGenerationOptions = {},
+): Promise<Array<{ front: string; back: string }>> => {
+  if (!activeApiKey) {
+    throw new Error('AI not initialized.');
+  }
+
+  const requestedCount = Math.max(1, Math.min(100, Math.round(count)));
+  const normalizedTopic = topic.trim().replace(/\s+/g, ' ');
+  const normalizedAdditionalInformation = (options.additionalInformation || '').trim();
+
+  if (!normalizedTopic) {
+    throw new Error('Topic is required to generate flashcards.');
+  }
+
+  const additionalInformationSection = normalizedAdditionalInformation
+    ? `\nAdditional information:\n${normalizedAdditionalInformation}\n`
+    : '';
+
+  const prompt = `Generate exactly ${requestedCount} high-quality study flashcards about "${normalizedTopic}".
+${additionalInformationSection}
+Rules:
+- Use concise but meaningful questions on the front side.
+- Use clear, correct, learner-friendly answers on the back side.
+- Avoid duplicates.
+- Keep each flashcard self-contained.
+You MUST respond with valid JSON ONLY in this schema:
+{
+  "flashcards": [
+    {
+      "front": "Question",
+      "back": "Answer"
+    }
+  ]
+}`;
+
+  const history = Array.isArray(options.history) ? options.history : [];
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: 'You are an expert educator. Output valid JSON ONLY.' }],
+    },
+    contents: createRequestContents(history, prompt),
+    generationConfig: {
+      maxOutputTokens: 8192,
+      responseMimeType: 'application/json',
+    },
+  };
+
+  addLog('llm_prompt', `Generating topic flashcards using ${activeModelId}`, payload);
+
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(activeModelId)}` +
+    `:generateContent?key=${encodeURIComponent(activeApiKey)}`;
+  const endpointForLogs = `models/${activeModelId}:generateContent`;
+  const requestStartedAt = Date.now();
+  let httpStatus: number | undefined;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    httpStatus = response.status;
+    if (!response.ok) {
+      throw new Error(`Gemini request failed with status ${response.status}.`);
+    }
+
+    const data = await response.json();
+    const text = parseChunkText(data);
+    if (!text) {
+      throw new Error('Gemini returned an empty topic flashcards response.');
+    }
+
+    addLog('llm_response', `Received topic flashcards response from ${activeModelId}`, { text });
+    return parseTopicFlashcardsResult(text).slice(0, requestedCount);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Gemini topic flashcards request failed unexpectedly.';
+    addLog('error', 'Gemini topic flashcards request failed', {
+      requestType: 'flashcards_topic_generation',
+      modelId: activeModelId,
+      endpoint: endpointForLogs,
+      errorMessage,
+      httpStatus,
+      durationMs: Date.now() - requestStartedAt,
+    });
+
+    if (error instanceof Error) throw error;
+    throw new Error('Gemini topic flashcards request failed.');
   }
 };
 

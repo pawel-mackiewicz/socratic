@@ -5,9 +5,12 @@ import {
   type Dispatch,
   type SetStateAction,
 } from 'react';
-import { evaluateFlashcardAnswer, generateFlashcards } from '../ai-service';
+import { evaluateFlashcardAnswer, generateFlashcards, generateTopicFlashcards } from '../ai-service';
 import { FLASHCARDS_STORAGE_KEY } from '../constants/storage';
 import {
+  annotateFlashcardDrafts,
+  buildFlashcardFrontKeySet,
+  createTopicConversationId,
   createFlashcardsFromGenerated,
   loadStoredFlashcards,
 } from '../domain/flashcards';
@@ -33,6 +36,8 @@ export interface FlashcardDraft {
   back: string;
   topic: string;
   conversationId: string;
+  isDuplicate: boolean;
+  isIncomplete: boolean;
 }
 
 export interface UseFlashcardsResult {
@@ -42,6 +47,8 @@ export interface UseFlashcardsResult {
   isFlashcardsManageView: boolean;
   setIsFlashcardsManageView: Dispatch<SetStateAction<boolean>>;
   isGeneratingFlashcards: boolean;
+  isGeneratingTopicFlashcards: boolean;
+  topicGenerationError: string | null;
   currentCard: Flashcard | null;
   dueCardsCount: number;
   isEvaluatingAnswer: boolean;
@@ -52,6 +59,12 @@ export interface UseFlashcardsResult {
   correctedAnswer: string;
   flashcardDrafts: FlashcardDraft[];
   generateForConversation: (conversation: Conversation | null) => Promise<void>;
+  generateForTopic: (params: {
+    topic: string;
+    count: number;
+    additionalInformation?: string;
+  }) => Promise<void>;
+  clearTopicGenerationError: () => void;
   updateFlashcardDraft: (id: string, field: 'front' | 'back', value: string) => void;
   removeFlashcardDraft: (id: string) => void;
   saveFlashcardDrafts: () => void;
@@ -67,6 +80,8 @@ export const useFlashcards = (): UseFlashcardsResult => {
   const [isFlashcardsView, setIsFlashcardsView] = useState(false);
   const [isFlashcardsManageView, setIsFlashcardsManageView] = useState(false);
   const [isGeneratingFlashcards, setIsGeneratingFlashcards] = useState(false);
+  const [isGeneratingTopicFlashcards, setIsGeneratingTopicFlashcards] = useState(false);
+  const [topicGenerationError, setTopicGenerationError] = useState<string | null>(null);
   const [currentStudyCardId, setCurrentStudyCardId] = useState<string | null>(null);
   const [isEvaluatingAnswer, setIsEvaluatingAnswer] = useState(false);
   const [evaluationError, setEvaluationError] = useState<string | null>(null);
@@ -104,11 +119,24 @@ export const useFlashcards = (): UseFlashcardsResult => {
     resetEvaluationState();
   }, [currentCardId, resetEvaluationState]);
 
+  const annotateDrafts = useCallback(
+    (drafts: Array<Omit<FlashcardDraft, 'isDuplicate' | 'isIncomplete'>>): FlashcardDraft[] => {
+      const existingFrontKeys = buildFlashcardFrontKeySet(flashcards);
+      return annotateFlashcardDrafts(drafts, existingFrontKeys);
+    },
+    [flashcards],
+  );
+
+  const isTopicDraftBatch = useCallback((drafts: Array<{ conversationId: string }>): boolean => {
+    return drafts.some((draft) => draft.conversationId.startsWith('topic:'));
+  }, []);
+
   const generateForConversation = useCallback(
     async (conversation: Conversation | null) => {
       if (!conversation || isGeneratingFlashcards) return;
 
       setIsGeneratingFlashcards(true);
+      setTopicGenerationError(null);
 
       try {
         const topic = conversation.topic || conversation.title;
@@ -120,6 +148,8 @@ export const useFlashcards = (): UseFlashcardsResult => {
           back: g.back,
           topic,
           conversationId: conversation.id,
+          isDuplicate: false,
+          isIncomplete: false,
         }));
 
         setFlashcardDrafts(drafts);
@@ -133,35 +163,129 @@ export const useFlashcards = (): UseFlashcardsResult => {
     [isGeneratingFlashcards],
   );
 
-  const updateFlashcardDraft = useCallback((id: string, field: 'front' | 'back', value: string) => {
-    setFlashcardDrafts((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, [field]: value } : d))
-    );
+  const generateForTopic = useCallback(
+    async (params: {
+      topic: string;
+      count: number;
+      additionalInformation?: string;
+    }) => {
+      if (isGeneratingFlashcards || isGeneratingTopicFlashcards) return;
+
+      const normalizedTopic = params.topic.trim().replace(/\s+/g, ' ');
+      if (!normalizedTopic) {
+        setTopicGenerationError('Topic is required.');
+        return;
+      }
+
+      setIsGeneratingTopicFlashcards(true);
+      setTopicGenerationError(null);
+
+      try {
+        const generated = await generateTopicFlashcards(normalizedTopic, params.count, {
+          additionalInformation: params.additionalInformation,
+        });
+
+        const syntheticConversationId = createTopicConversationId(normalizedTopic);
+        const drafts = annotateDrafts(generated.map((entry) => ({
+          id: createId(),
+          front: entry.front,
+          back: entry.back,
+          topic: normalizedTopic,
+          conversationId: syntheticConversationId,
+        })));
+
+        setFlashcardDrafts(drafts);
+        setIsFlashcardsManageView(true);
+        setIsFlashcardsView(false);
+        addLog('action', `Generated ${drafts.length} topic flashcard drafts for "${normalizedTopic}"`);
+      } catch (error) {
+        setTopicGenerationError(getErrorMessage(error));
+      } finally {
+        setIsGeneratingTopicFlashcards(false);
+      }
+    },
+    [annotateDrafts, isGeneratingFlashcards, isGeneratingTopicFlashcards],
+  );
+
+  const clearTopicGenerationError = useCallback(() => {
+    setTopicGenerationError(null);
   }, []);
 
+  const updateFlashcardDraft = useCallback((id: string, field: 'front' | 'back', value: string) => {
+    setFlashcardDrafts((prev) => {
+      const updated = prev.map((d) => (d.id === id ? { ...d, [field]: value } : d));
+      if (!isTopicDraftBatch(updated)) {
+        return updated;
+      }
+
+      const seed = updated.map((draft) => ({
+          id: draft.id,
+          front: draft.front,
+          back: draft.back,
+          topic: draft.topic,
+          conversationId: draft.conversationId,
+        }));
+
+      return annotateDrafts(seed);
+    });
+  }, [annotateDrafts, isTopicDraftBatch]);
+
   const removeFlashcardDraft = useCallback((id: string) => {
-    setFlashcardDrafts((prev) => prev.filter((d) => d.id !== id));
-  }, []);
+    setFlashcardDrafts((prev) => {
+      const updated = prev.filter((d) => d.id !== id);
+      if (!isTopicDraftBatch(updated)) {
+        return updated;
+      }
+
+      const seed = updated.map((draft) => ({
+          id: draft.id,
+          front: draft.front,
+          back: draft.back,
+          topic: draft.topic,
+          conversationId: draft.conversationId,
+        }));
+
+      return annotateDrafts(seed);
+    });
+  }, [annotateDrafts, isTopicDraftBatch]);
 
   const saveFlashcardDrafts = useCallback(() => {
     if (flashcardDrafts.length === 0) return;
 
+    const validDrafts = flashcardDrafts.filter((d) => !d.isDuplicate && !d.isIncomplete);
+    if (validDrafts.length === 0) {
+      setTopicGenerationError('No valid flashcards to save. Fix duplicates or incomplete rows first.');
+      return;
+    }
+
     const newCards = createFlashcardsFromGenerated(
-      flashcardDrafts.map(d => ({ front: d.front, back: d.back })),
-      flashcardDrafts[0].topic,
-      flashcardDrafts[0].conversationId
+      validDrafts.map(d => ({ front: d.front, back: d.back })),
+      validDrafts[0].topic,
+      validDrafts[0].conversationId
     );
 
     setFlashcards((prev) => [...prev, ...newCards]);
-    setFlashcardDrafts([]);
-    setIsFlashcardsManageView(false);
-    setIsFlashcardsView(true);
+    const remainingDrafts = flashcardDrafts.filter((d) => d.isDuplicate || d.isIncomplete);
+
+    if (remainingDrafts.length > 0) {
+      setFlashcardDrafts(remainingDrafts);
+      setIsFlashcardsManageView(true);
+      setIsFlashcardsView(false);
+      setTopicGenerationError(`Saved ${newCards.length} flashcards. ${remainingDrafts.length} draft(s) still need fixes.`);
+    } else {
+      setFlashcardDrafts([]);
+      setIsFlashcardsManageView(false);
+      setIsFlashcardsView(true);
+      setTopicGenerationError(null);
+    }
+
     addLog('action', `Saved ${newCards.length} flashcards from drafts`);
   }, [flashcardDrafts]);
 
   const discardFlashcardDrafts = useCallback(() => {
     setFlashcardDrafts([]);
     setIsFlashcardsManageView(false);
+    setTopicGenerationError(null);
     addLog('action', 'Discarded flashcard drafts');
   }, []);
 
@@ -261,6 +385,8 @@ export const useFlashcards = (): UseFlashcardsResult => {
     isFlashcardsManageView,
     setIsFlashcardsManageView,
     isGeneratingFlashcards,
+    isGeneratingTopicFlashcards,
+    topicGenerationError,
     currentCard,
     dueCardsCount: dueCards.length,
     isEvaluatingAnswer,
@@ -271,6 +397,8 @@ export const useFlashcards = (): UseFlashcardsResult => {
     correctedAnswer,
     flashcardDrafts,
     generateForConversation,
+    generateForTopic,
+    clearTopicGenerationError,
     updateFlashcardDraft,
     removeFlashcardDraft,
     saveFlashcardDrafts,
